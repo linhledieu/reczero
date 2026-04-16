@@ -69,6 +69,12 @@ class Tracking(object):
             if backend is None or default_backend in backend:
                 logger_instance.log(data=data, step=step)
 
+    def finish(self):
+        if 'wandb' in self.logger:
+            self.logger['wandb'].finish()
+        if 'tensorboard' in self.logger:
+            self.tensorboard_writer.close()
+
 
 class _MlflowLoggingAdapter:
 

@@ -764,6 +764,7 @@ class RayPPOTrainer(object):
         try:
             import csv
             csv_path = Path(self.config.trainer.default_local_dir) / "val_metrics.csv"
+            csv_path.parent.mkdir(parents=True, exist_ok=True)
             fieldnames = ["step", "val/mae", "val/rmse", "val/exact_match", "val/in_one_range"]
             write_header = not csv_path.exists()
             with csv_path.open("a", newline="") as f:
@@ -773,8 +774,8 @@ class RayPPOTrainer(object):
                 row = {"step": int(step)}
                 row.update(metric_dict)
                 writer.writerow(row)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[warn] failed to write val_metrics.csv: {e}")
 
         return metric_dict
 
@@ -924,6 +925,7 @@ class RayPPOTrainer(object):
             pprint(f'Initial validation metrics: {val_metrics}')
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get('val_only', False):
+                logger.finish()
                 return
 
         # we start from step 1
@@ -1050,6 +1052,7 @@ class RayPPOTrainer(object):
                                 )
                                 logger.log(data=metrics, step=self.global_steps)
                                 self._save_checkpoint()
+                                logger.finish()
                                 return
 
                     if self.config.trainer.save_freq > 0 and \
@@ -1077,6 +1080,7 @@ class RayPPOTrainer(object):
                         val_metrics = self._validate()
                         pprint(f'Final validation metrics: {val_metrics}')
                         logger.log(data=val_metrics, step=self.global_steps)
+                    logger.finish()
                     return
 
     
