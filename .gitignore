@@ -146,3 +146,5 @@ data/*
 !data/music
 !data/book
 !data/yelp
+!data/test_reczero
+!data/test_reczero/**
