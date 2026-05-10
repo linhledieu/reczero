@@ -418,10 +418,11 @@ class RayPPOTrainer(object):
                                        filter_prompts=True,
                                        return_raw_chat=self.config.data.get('return_raw_chat', False),
                                        truncation='error')
+        val_batch_size = self.config.data.get('val_batch_size', len(self.val_dataset))
         self.val_dataloader = DataLoader(dataset=self.val_dataset,
-                                         batch_size=200,
-                                         shuffle=True,
-                                         drop_last=True,
+                                         batch_size=val_batch_size,
+                                         shuffle=False,
+                                         drop_last=False,
                                          collate_fn=collate_fn)
 
         assert len(self.train_dataloader) >= 1

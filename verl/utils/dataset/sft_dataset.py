@@ -78,13 +78,20 @@ class SFTDataset(Dataset):
                 ls = ls[0]
             return ls
 
+        def maybe_squeeze_single_column(frame_or_series):
+            if isinstance(frame_or_series, pd.DataFrame):
+                if frame_or_series.shape[1] != 1:
+                    return frame_or_series
+                return frame_or_series.iloc[:, 0]
+            return frame_or_series
+
         dataframes = []
         for parquet_file in self.parquet_files:
             # read parquet files and cache
             dataframe = pd.read_parquet(parquet_file)
             dataframes.append(dataframe)
         self.dataframe = pd.concat(dataframes)
-        self.prompts = self.dataframe[self.prompt_key]
+        self.prompts = maybe_squeeze_single_column(self.dataframe[self.prompt_key])
         for key in self.prompt_dict_keys:
             # type(x): pandas.core.series.Series
             # type(x[0]): numpy.ndarray
@@ -95,7 +102,7 @@ class SFTDataset(Dataset):
                 print(f'self.prompts={self.prompts}')
                 raise
         self.prompts = self.prompts.tolist()
-        self.responses = self.dataframe[self.response_key]
+        self.responses = maybe_squeeze_single_column(self.dataframe[self.response_key])
         for key in self.response_dict_keys:
             try:
                 self.responses = self.responses.apply(lambda x: series_to_item(x)[key], axis=1)
@@ -135,6 +142,9 @@ class SFTDataset(Dataset):
         input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
         attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
 
+        kept_prompt_length = prompt_length
+        kept_response_length = response_length
+
         # padding to max length
         sequence_length = input_ids.shape[0]
         if sequence_length < self.max_length:
@@ -147,11 +157,16 @@ class SFTDataset(Dataset):
         elif sequence_length > self.max_length:
             if self.truncation == 'left':
                 # actually, left truncation may not be reasonable
+                start = sequence_length - self.max_length
                 input_ids = input_ids[-self.max_length:]
                 attention_mask = attention_mask[-self.max_length:]
+                kept_prompt_length = max(prompt_length - start, 0)
+                kept_response_length = self.max_length - kept_prompt_length
             elif self.truncation == 'right':
                 input_ids = input_ids[:self.max_length]
                 attention_mask = attention_mask[:self.max_length]
+                kept_prompt_length = min(prompt_length, self.max_length)
+                kept_response_length = max(self.max_length - kept_prompt_length, 0)
             elif self.truncation == 'error':
                 raise NotImplementedError(f'{sequence_length=} is larger than {self.max_length=}')
             else:
@@ -160,11 +175,12 @@ class SFTDataset(Dataset):
         position_ids = compute_position_id_with_mask(attention_mask)
 
         loss_mask = attention_mask.clone()
-        if prompt_length > 1:
+        if kept_prompt_length > 1:
             # mask out prompt for SFT.
-            loss_mask[:min(prompt_length, loss_mask.size(0)) - 1] = 0
+            loss_mask[:min(kept_prompt_length, loss_mask.size(0)) - 1] = 0
         # mask out the last token in response
-        loss_mask[min(prompt_length + response_length, loss_mask.size(0)) - 1] = 0
+        if kept_response_length > 0:
+            loss_mask[min(kept_prompt_length + kept_response_length, loss_mask.size(0)) - 1] = 0
 
         return {
             'input_ids': input_ids,

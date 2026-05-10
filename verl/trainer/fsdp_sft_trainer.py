@@ -246,6 +246,11 @@ class FSDPSFTTrainer(object):
         else:
             dp_size = 1
 
+        if valid_token_this_rank.item() == 0:
+            # Some samples can lose the entire supervised response after truncation.
+            # Return a zeroed loss instead of propagating NaNs through the optimizer.
+            return torch.sum(logits.float()) * 0
+
         loss = torch.sum(loss) / valid_token_this_rank * dp_size  # possible bugs here for dp
         return loss
 
@@ -293,14 +298,16 @@ class FSDPSFTTrainer(object):
         return loss
 
     def save_checkpoint(self, step):
-        # save checkpoint
+        save_freq = getattr(self.config.trainer, 'save_freq', 100)
+        if step % save_freq != 0:
+            return
+
         from torch.distributed.fsdp import FullStateDictConfig, StateDictType
         cfg = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         with FSDP.state_dict_type(self.fsdp_model, StateDictType.FULL_STATE_DICT, cfg):
             state_dict = self.fsdp_model.state_dict()
 
         path = os.path.join(self.config.trainer.default_local_dir, f'global_step_{step}')
-        # save huggingface model
         if self.device_mesh.get_rank() == 0:
             os.makedirs(path, exist_ok=True)
             self.model.save_pretrained(path, state_dict=state_dict)
@@ -308,6 +315,20 @@ class FSDPSFTTrainer(object):
             if self.config.trainer.default_hdfs_dir:
                 hdfs_io.makedirs(self.config.trainer.default_hdfs_dir, exist_ok=True)
                 hdfs_io.copy(src=path, dst=self.config.trainer.default_hdfs_dir, dirs_exist_ok=True)
+
+            # keep only the last save_total_limit checkpoints
+            save_total_limit = getattr(self.config.trainer, 'save_total_limit', 2)
+            ckpt_dir = self.config.trainer.default_local_dir
+            existing = sorted(
+                [d for d in os.listdir(ckpt_dir) if d.startswith('global_step_')],
+                key=lambda x: int(x.split('_')[-1])
+            )
+            while len(existing) > save_total_limit:
+                to_delete = os.path.join(ckpt_dir, existing.pop(0))
+                import shutil
+                shutil.rmtree(to_delete, ignore_errors=True)
+                print(f"[checkpoint] deleted old checkpoint: {to_delete}")
+
         torch.distributed.barrier()
 
     def fit(self):
@@ -320,8 +341,9 @@ class FSDPSFTTrainer(object):
                                 default_backend=self.config.trainer.logger)
 
         global_step = 0
-
-        # TODO (zhangchi.usc1992) add back checkpoint manager. Currently, it blocks when uploading to hdfs. So very slow.
+        best_val_loss = float('inf')
+        patience = getattr(self.config.trainer, 'early_stop_patience', None)
+        no_improve_count = 0
 
         for epoch in range(self.config.trainer.total_epochs):
             self.train_sampler.set_epoch(epoch=epoch)
@@ -342,10 +364,26 @@ class FSDPSFTTrainer(object):
                 val_loss = torch.mean(torch.stack(val_losses))
                 metric = {'val/loss': val_loss.detach().item()}
                 tracking.log(data=metric, step=global_step)
+                print(f"[epoch {epoch}] val/loss={val_loss.item():.4f} best={best_val_loss:.4f}")
             torch.distributed.barrier()
 
             # save checkpoint
             self.save_checkpoint(step=global_step)
+
+            # early stopping
+            if patience is not None:
+                current_val_loss = torch.mean(torch.stack(val_losses)).item()
+                if current_val_loss < best_val_loss:
+                    best_val_loss = current_val_loss
+                    no_improve_count = 0
+                else:
+                    no_improve_count += 1
+                    if rank == 0:
+                        print(f"[early stop] no improvement {no_improve_count}/{patience}")
+                    if no_improve_count >= patience:
+                        if rank == 0:
+                            print(f"[early stop] stopping at epoch {epoch}, best val/loss={best_val_loss:.4f}")
+                        break
 
 
 from verl.trainer.fsdp_sft_trainer import FSDPSFTTrainer
